@@ -1,0 +1,5 @@
+zones:
+  - smp_id: 6665610ec7102da65e0f95ef
+    # xyxyn format
+    cashier: [0, 0.2, 0.15, 0.7]
+    exit: [0.6, 0.66, 1.0, 1.0]
