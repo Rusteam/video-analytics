@@ -13,6 +13,8 @@ multiple various tasks.
 - \[ \] Identify number of unique customers that made a purchase
 - \[ \] Identify if cashier is right or left-handed
 
+[!img](./example.gif)
+
 ## Usage
 
 ### Installation
@@ -160,3 +162,5 @@ There are few steps to tackle this problem:
 
 Use tracks of pose estimation in order to make initial assumptions
 about cashier handedness as frequency of usage of each hand.
+If this approach leads to wrong detections, use extracted pose
+features to train a simple machine learning model.
