@@ -13,7 +13,7 @@ multiple various tasks.
 - \[ \] Identify number of unique customers that made a purchase
 - \[ \] Identify if cashier is right or left-handed
 
-[!img](./example.gif)
+![example output](./example.gif)
 
 ## Usage
 
