@@ -32,16 +32,46 @@ def _boxes_match(src_detection: list[float], target_detection: list[float]):
 
 
 class UltralyticsModel(pydantic.BaseModel):
-    name: str = pydantic.Field("yolov8s.pt", description="Ultralytics model name")
+    model: str = pydantic.Field("yolov8s.pt", description="Ultralytics model name")
     conf_threshold: float = 0.25
     iou_threshold: float = 0.45
     image_size: int = 640
 
     @property
     def detector(self):
-        return YOLO(
-            self.name,
-            task="detect",
+        return YOLO(self.model, task="detect")
+
+    @property
+    def pose_estimator(self):
+        return YOLO(self.model)
+
+    @property
+    def keypoint_skeleton(self):
+        return fo.KeypointSkeleton(
+            labels=[
+                "nose",
+                "left eye",
+                "right eye",
+                "left ear",
+                "right ear",
+                "left shoulder",
+                "right shoulder",
+                "left elbow",
+                "right elbow",
+                "left wrist",
+                "right wrist",
+                "left hip",
+                "right hip",
+                "left knee",
+                "right knee",
+                "left ankle",
+                "right ankle",
+            ],
+            edges=[
+                [11, 5, 3, 1, 0, 2, 4, 6, 12],
+                [9, 7, 5, 6, 8, 10],
+                [15, 13, 11, 12, 14, 16],
+            ],
         )
 
     def track(self, path: str | Path):
@@ -53,6 +83,9 @@ class UltralyticsModel(pydantic.BaseModel):
             stream=True,
             show=False,
         )
+
+    def detect_keypoints(self, path: str | Path):
+        return self.pose_estimator(path, stream=True, show=False)
 
 
 class AnnotatedZone(pydantic.BaseModel):
@@ -125,6 +158,23 @@ class FiftyoneDataset(pydantic.BaseModel):
                 frame_no += 1
             smp.save()
         cprint(f"Finished tracking for {len(self.dataset)} samples", "green")
+
+    def detect_keypoints(self, label_field: str = "keypoints", **kwargs):
+        """Apply yolov8 detector and tracker"""
+        model = UltralyticsModel(**kwargs)
+        self._load_dataset()
+        self.dataset.default_skeleton = model.keypoint_skeleton
+        for smp in self.dataset.select_fields():
+            results = model.track(smp.filepath)
+            frame_no = 1
+            for res in results:
+                keypoints = fouu.to_keypoints(res)
+                for det, idx in zip(keypoints.keypoints, res.boxes.id):
+                    det.index = idx
+                smp.frames[frame_no][label_field] = keypoints
+                frame_no += 1
+            smp.save()
+        cprint(f"Finished pose estimation for {len(self.dataset)} samples", "green")
 
     def annotate_zones(self, annotations: str, label_field: str = "zone"):
         """Use config file with zone annotations to add to fiftyone"""
