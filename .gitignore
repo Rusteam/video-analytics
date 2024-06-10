@@ -1,0 +1,9 @@
+__pycache__
+
+.conda-env
+.env
+
+*.pt
+
+/data
+/models

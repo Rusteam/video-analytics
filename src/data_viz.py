@@ -17,6 +17,20 @@ def _load_yaml(path: str):
         return yaml.safe_load(fp)
 
 
+def _boxes_match(src_detection: list[float], target_detection: list[float]):
+    """Check if two bboxes overlap.
+
+    Two bboxes overlap if the center of the source
+    bbox is within the bounds of the target_bbox.
+    """
+    x, y, w, h = src_detection.bounding_box
+    zone_x, zone_y, zone_w, zone_h = target_detection.bounding_box
+    bbox_center = (x + w / 2, y + h / 2)
+    within_x = zone_x < bbox_center[0] < zone_x + zone_w
+    within_y = zone_y < bbox_center[1] < zone_y + zone_h
+    return int(within_x and within_y)
+
+
 class UltralyticsModel(pydantic.BaseModel):
     name: str = pydantic.Field("yolov8s.pt", description="Ultralytics model name")
     conf_threshold: float = 0.25
@@ -115,8 +129,7 @@ class FiftyoneDataset(pydantic.BaseModel):
     def annotate_zones(self, annotations: str, label_field: str = "zone"):
         """Use config file with zone annotations to add to fiftyone"""
         self._load_dataset()
-        if self.dataset.has_frame_field(label_field):
-            self.dataset.delete_frame_field(label_field)
+        self._delete_field_if_exists(label_field)
 
         zone_config = _load_yaml(annotations).get("zones", [])
         for conf in zone_config:
@@ -136,45 +149,32 @@ class FiftyoneDataset(pydantic.BaseModel):
     ):
         """Classify each track id as a customer or cashier base on zone intersection"""
         self._load_dataset()
-        n_matches = {}
-        view = self.dataset.filter_labels(
-            f"frames.{ tracking_field }", fo.ViewField("label") == "person"
-        )
+        self._delete_field_if_exists(new_field)
+        view = self._filter_labels(tracking_field, "person")
+
         # count iou matching with cashier
+        n_matches = {}
         for smp in view.select_fields(
             [f"frames.{ tracking_field }", f"frames.{ zone_field }"]
         ):
             n_matches[smp.id] = defaultdict(lambda: 0)
             for frame_id in smp.frames:
                 detections = smp[frame_id][tracking_field].detections
-                zone = list(
-                    filter(
-                        lambda x: x.label == "cashier",
-                        smp[frame_id][zone_field].detections,
-                    )
-                )[0]
-                zone_x, zone_y, zone_w, zone_h = zone.bounding_box
+                zone = self._get_zone_bbox(smp[frame_id], zone_field, "cashier")
                 for det in detections:
-                    x, y, w, h = det.bounding_box
-                    bbox_center = (x + w / 2, y + h / 2)
-                    within_x = zone_x < bbox_center[0] < zone_x + zone_w
-                    within_y = zone_y < bbox_center[1] < zone_y + zone_h
-                    n_matches[smp.id][det.index] += int(within_x and within_y)
+                    n_matches[smp.id][det.index] += _boxes_match(det, zone)
 
         # update class labels for customer and cashiers
         for smp in view.select_fields(f"frames.{tracking_field}"):
             smp_view = self.dataset.select(smp.id)
-            totals = smp_view.count_values(f"frames.{tracking_field}.detections.index")
+            totals = self._count_frame_values(smp_view, tracking_field, "index")
             for frame_id in smp.frames:
                 detections = []
                 for det in smp.frames[frame_id][tracking_field].detections:
-                    if det.index not in n_matches[smp.id]:
-                        continue
-
-                    is_cashier = (
+                    match_ratio = (
                         n_matches[smp.id][det.index] / totals[det.index] > iou_threshold
                     )
-                    label = "cashier" if is_cashier else "customer"
+                    label = "cashier" if match_ratio else "customer"
                     detections.append(
                         fo.Detection(
                             label=label,
@@ -184,12 +184,45 @@ class FiftyoneDataset(pydantic.BaseModel):
                         )
                     )
                 smp[frame_id][new_field] = fo.Detections(detections=detections)
-
             smp.save()
 
             # print counts of customers
             for label in ["cashier", "customer"]:
-                n_distinct = smp_view.filter_labels(
-                    f"frames.{new_field}", fo.ViewField("label") == label
-                ).distinct(f"frames.{new_field}.detections.index")
-                cprint(f"{smp.id} {label} counts: {len(n_distinct)}", "green")
+                distinct_vals = self._get_distinct_indices(smp_view, new_field, label)
+                cprint(f"{smp.id} {label} counts: {len(distinct_vals)}", "green")
+
+    def _delete_field_if_exists(self, label_field: str):
+        if not self.dataset:
+            raise RuntimeError("make sure to load the dataset first")
+
+        if self.dataset.has_frame_field(label_field):
+            self.dataset.delete_frame_field(label_field)
+
+    def _filter_labels(self, label_field: str, label: str):
+        return self.dataset.filter_labels(
+            f"frames.{ label_field }", fo.ViewField("label") == label
+        )
+
+    @staticmethod
+    def _get_zone_bbox(smp_frame: fo.Sample, zone_field: str, label: str):
+        return list(
+            filter(
+                lambda x: x.label == label,
+                smp_frame[zone_field].detections,
+            )
+        )[0]
+
+    @staticmethod
+    def _count_frame_values(
+        view: fo.DatasetView,
+        label_field: str,
+        value: str,
+        label_type: str = "detections",
+    ):
+        return view.count_values(f"frames.{label_field}.{label_type}.{value}")
+
+    @staticmethod
+    def _get_distinct_indices(view: fo.DatasetView, label_field: str, label: str):
+        return view.filter_labels(
+            f"frames.{label_field}", fo.ViewField("label") == label
+        ).distinct(f"frames.{label_field}.detections.index")
