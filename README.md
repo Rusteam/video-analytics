@@ -8,7 +8,7 @@ multiple various tasks.
 
 - \[x\] Identify number of unique customers in the shop
 - \[x\] Track each customer
-- \[ \] Identify how many people entered and exited shop during the video
+- \[x\] Identify how many people entered and exited shop during the video
 - \[ \] Identify gender (male/female) and age (child/adult as classification) for each customer
 - \[ \] Identify number of unique customers that made a purchase
 - \[ \] Identify if cashier is right or left-handed
@@ -65,6 +65,8 @@ FLAGS
 
 ### Run the commands
 
+#### Create a dataset with detections and tracks
+
 1. Create a fiftyone dataset to visualize data and labels:
 
 ```
@@ -83,7 +85,7 @@ pymn FiftyoneDataset --name <name> track --model yolov8s --label-field yolov8s
 This command will create a label field "yolov8s" that will contain
 detections with COCO classes and track ids.
 
-3. Count and track customers
+#### Count and track customers
 
 To be able to identify a customer we need to annotate
 a cashier's zone in a yaml config file. Once a fiftyone
@@ -91,7 +93,7 @@ dataset is created, find out video sample id from web UI
 and add an entry to the [ config file ](configs/annotations.yaml)
 following the existing example.
 
-3.1. Add these annotations to fiftyone:
+1. Add these annotations to fiftyone:
 
 ```
 pymn FiftyoneDataset --name <name> annotate_zones configs/annotations.yaml --label_field zone
@@ -99,16 +101,28 @@ pymn FiftyoneDataset --name <name> annotate_zones configs/annotations.yaml --lab
 
 Verify the correctness of zone annotations in the fiftyone app.
 
-3.2. After adding zones, run the following command to label
-each person as a cashier or a customer:
+2. After adding zones, run the following command to label
+   each person as a cashier or a customer:
 
 ```
 ❯ pymn FiftyoneDataset --name <name> identify_customer --tracking_field yolov8s --zone_field zone --iou-threshold 0.5
 
 Output:
-6665610ec7102da65e0f95ef cashier counts: 2
-6665610ec7102da65e0f95ef customer counts: 41
+6665610ec7102da65e0f95ef cashier count: 2
+6665610ec7102da65e0f95ef customer count: 41
 ```
 
 A new label field is created that maps a "person" class to either "cashier" or
 "customer" based on the intersection with the "cashier" zone.
+
+#### Number of customers exiting the shop
+
+This step assumes that the exit zone has been annotated at
+the previous step, as well as customer identification.
+
+```
+❯ pymn FiftyoneDataset --name <name> identify_exit --tracking_field visitor_type --zone_field zone
+
+Output:
+6665610ec7102da65e0f95ef: Number of customers exiting is 4
+```

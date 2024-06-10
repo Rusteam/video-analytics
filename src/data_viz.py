@@ -189,7 +189,39 @@ class FiftyoneDataset(pydantic.BaseModel):
             # print counts of customers
             for label in ["cashier", "customer"]:
                 distinct_vals = self._get_distinct_indices(smp_view, new_field, label)
-                cprint(f"{smp.id} {label} counts: {len(distinct_vals)}", "green")
+                cprint(f"{smp.id} {label} count: {len(distinct_vals)}", "green")
+
+    def identify_exit(self, tracking_field: str, zone_field: str):
+        """Identify customers exiting the shop.
+
+        Exit is defined as an intersection with the exit zone
+        for last frame for a customer track id.
+        """
+        self._load_dataset()
+
+        for smp in self.dataset:
+            smp_view = self.dataset.select(smp.id)
+            customer_tracks = self._get_distinct_indices(
+                smp_view, tracking_field, "customer"
+            )
+            n_exit = 0
+            cur_frame = smp.metadata["total_frame_count"]
+            while len(customer_tracks) > 0 and cur_frame > 1:
+                # FIXME skip frames that do not contain labels
+                if not smp[cur_frame][tracking_field]:
+                    cur_frame -= 1
+                    continue
+
+                # check if last customer frame is in the exit box
+                for det in smp[cur_frame][tracking_field].detections:
+                    if det.index in customer_tracks:
+                        # FIXME optimize time complexity
+                        customer_tracks.remove(det.index)
+                        zone = self._get_zone_bbox(smp[cur_frame], zone_field, "exit")
+                        n_exit += _boxes_match(det, zone)
+                cur_frame -= 1
+
+            cprint(f"{smp.id}: Number of customers exiting is {n_exit}", "green")
 
     def _delete_field_if_exists(self, label_field: str):
         if not self.dataset:
@@ -198,10 +230,15 @@ class FiftyoneDataset(pydantic.BaseModel):
         if self.dataset.has_frame_field(label_field):
             self.dataset.delete_frame_field(label_field)
 
-    def _filter_labels(self, label_field: str, label: str):
-        return self.dataset.filter_labels(
-            f"frames.{ label_field }", fo.ViewField("label") == label
-        )
+    def _filter_labels(
+        self,
+        label_field: str,
+        label: str,
+        key: str = "label",
+        view: None | fo.DatasetView = None,
+    ):
+        view = view or self.dataset
+        return view.filter_labels(f"frames.{ label_field }", fo.ViewField(key) == label)
 
     @staticmethod
     def _get_zone_bbox(smp_frame: fo.Sample, zone_field: str, label: str):
