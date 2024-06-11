@@ -186,13 +186,30 @@ and review the label counts in the `clip` field.
 There are few steps to tackle this problem:
 
 1. Detect customers spending at least n number of seconds around a register.
-1. Estimate customer pose, verify hands are above the register table.
+1. Estimate customer pose, ensure hands intersect with the cashier's desk.
 1. Add these identifications for human verification.
 1. Train a video action recognition model to identify a target event.
 
-#### Identify if cashier is right or left-handed (TODO)
+#### Identify if cashier is right or left-handed
 
-Use tracks of pose estimation in order to make initial assumptions
-about cashier handedness as frequency of usage of each hand.
-If this approach leads to wrong detections, use extracted pose
-features to train a simple machine learning model.
+To identify a cashier's handedness we apply pose estimation model
+on a patch-level for cashiers and compute a magnitude (i.e. xy-variance)
+of each hand movement across frames.
+
+```
+❯ pymn FiftyoneDataset --name AIQ cashier_hand
+
+Output:
+Cashier 'cashier-12' is 'right'-handed: left_var=0.07, right_var=0.12
+Cashier 'cashier-16' is 'left'-handed: left_var=0.03, right_var=0.03
+```
+
+Keypoint detection can be review in the fiftyone app as well.
+Filter on a specific cashier with the `cashier_id` field and
+then select wrist labels in the `keypoints` field. It might be
+useful to set a confidence threshold around 0.4-0.6.
+
+**Possible improvements:**
+
+1. Select top patches for each cashier
+1. Track hand detection across frames and compute movement magnitude.

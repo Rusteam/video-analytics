@@ -7,6 +7,7 @@ import fiftyone as fo
 import fiftyone.types as fot
 import fiftyone.utils.ultralytics as fouu
 import fiftyone.zoo as foz
+import numpy as np
 import pydantic
 import yaml
 from termcolor import cprint
@@ -44,6 +45,9 @@ class UltralyticsModel(pydantic.BaseModel):
 
     @property
     def pose_estimator(self):
+        if "pose" not in self.model:
+            size, ext = self.model.split(".")
+            self.model = f"{size}-pose.{ext}"
         return YOLO(self.model)
 
     @property
@@ -157,6 +161,8 @@ class FiftyoneDataset(pydantic.BaseModel):
                     det.index = idx
                 smp.frames[frame_no][label_field] = detections
                 frame_no += 1
+                if frame_no > 20:
+                    break
             smp.save()
         cprint(f"Finished tracking for {len(self.dataset)} samples", "green")
 
@@ -169,7 +175,7 @@ class FiftyoneDataset(pydantic.BaseModel):
             results = model.track(smp.filepath)
             frame_no = 1
             for res in results:
-                keypoints = fouu.to_keypoints(res)
+                keypoints = fouu.to_keypoints(res, confidence_thresh=0.4)
                 for det, idx in zip(keypoints.keypoints, res.boxes.id):
                     det.index = idx
                 smp.frames[frame_no][label_field] = keypoints
@@ -277,40 +283,14 @@ class FiftyoneDataset(pydantic.BaseModel):
 
     def classify_customers(
         self,
-        patch_field: str,
-        export_dir: str = "./data/export/patches",
+        patch_field: str = "visitor_type",
+        export_dir: str = "./tmp/patches",
         overwrite: bool = False,
     ):
-        patches_dataset_name = f"{self.name}-patches"
-        if fo.dataset_exists(patches_dataset_name) and overwrite:
-            fo.delete_dataset(patches_dataset_name, verbose=True)
-        elif fo.dataset_exists(patches_dataset_name):
-            patches_dataset = fo.load_dataset(patches_dataset_name)
-        else:
-            # # export patches
-            self._load_dataset()
-            customer_view = self._filter_labels(patch_field, label="customer")
-            patches = customer_view.to_frames(sample_frames=True).to_patches(
-                patch_field
-            )
-            for p in patches:
-                p[
-                    patch_field
-                ].label = f"{ p[patch_field].label }-{p[patch_field].index}"
-                p.save()
-            patches.export(
-                export_dir=export_dir,
-                dataset_type=fot.ImageClassificationDirectoryTree,
-                label_field=patch_field,
-            )
-            patches_dataset = fo.Dataset.from_dir(
-                export_dir,
-                dataset_type=fot.ImageClassificationDirectoryTree,
-                label_field="customer_id",
-                name=f"{self.name}-patches",
-                persistent=True,
-            )
-
+        """Classify each patch with a clip model"""
+        patches_dataset = self._create_patches(
+            patch_field, "customer", export_dir, overwrite
+        )
         # classify patches
         clip = foz.load_zoo_model(
             "clip-vit-base32-torch", classes=["adult man", "adult woman", "girl", "boy"]
@@ -329,6 +309,92 @@ class FiftyoneDataset(pydantic.BaseModel):
                 k: round(v / num_predictions, 2) for k, v in label_counts.items()
             }
             cprint(f"Customer {idx!r} class probabilities: {class_probs}", "green")
+
+    def cashier_hand(
+        self,
+        patch_field: str = "visitor_type",
+        export_dir: str = "./tmp/patches",
+        overwrite: bool = False,
+        **kwargs,
+    ):
+        """Detect if a cashier is right-handed or left-handed."""
+        patches_dataset = self._create_patches(
+            patch_field, "cashier", export_dir, overwrite
+        ).take(
+            200
+        )  # TODO find a way to select best samples
+
+        # classify patches
+        model = UltralyticsModel(**kwargs)
+        patches_dataset.apply_model(
+            model.pose_estimator,
+            label_field="keypoints",
+            batch_size=4,
+            confidence_thresh=kwargs.get("conf_threshold", 0.5),
+        )
+        patches_dataset.default_skeleton = model.keypoint_skeleton
+        cprint(f"Finished predicting on {len(patches_dataset)} samples", "yellow")
+
+        # retrieve detected keypoints per cashier and compute variances
+        right_index = patches_dataset.default_skeleton.labels.index("right wrist")
+        left_index = patches_dataset.default_skeleton.labels.index("left wrist")
+        customer_ids = patches_dataset.distinct("cashier_id.label")
+        for idx in customer_ids:
+            view = patches_dataset.match(fo.ViewField("cashier_id.label") == idx)
+            points = view.values("keypoints.keypoints.points")
+            # TODO consider confidence threshold and exclude zeros
+            # select x,y for each hand and compute variance across each dimension
+            left_points = np.array(
+                [p[0][left_index] for p in points if p and sum(p[0][left_index]) > 0]
+            )
+            right_points = np.array(
+                [p[0][right_index] for p in points if p and sum(p[0][right_index]) > 0]
+            )
+            left_var = (np.var(left_points[0]) + np.var(left_points[1])) / 2
+            right_var = (np.var(right_points[0]) + np.var(right_points[1])) / 2
+
+            cashier_hand = "left" if left_var > right_var else "right"
+            cprint(
+                f"Cashier {idx!r} is {cashier_hand!r}-handed: {left_var=:.2f}, {right_var=:.2f}",
+                "green",
+            )
+
+    def _create_patches(
+        self, patch_field: str, label: str, export_dir: str, overwrite: bool
+    ):
+        """Export detetion patches to disk and create a new dataset"""
+
+        patches_dataset_name = f"{self.name}-{label}-patches"
+        if fo.dataset_exists(patches_dataset_name) and overwrite:
+            fo.delete_dataset(patches_dataset_name, verbose=True)
+
+        if fo.dataset_exists(patches_dataset_name):
+            patches_dataset = fo.load_dataset(patches_dataset_name)
+        else:
+            # export patches
+            self._load_dataset()
+            customer_view = self._filter_labels(patch_field, label=label)
+            patches = customer_view.to_frames(sample_frames=True).to_patches(
+                patch_field
+            )
+            for p in patches:
+                p[patch_field].label = f"{p[patch_field].label}-{p[patch_field].index}"
+                p.save()
+            patches.export(
+                export_dir=export_dir,
+                dataset_type=fot.ImageClassificationDirectoryTree,
+                label_field=patch_field,
+            )
+            patches_dataset = fo.Dataset.from_dir(
+                export_dir,
+                dataset_type=fot.ImageClassificationDirectoryTree,
+                label_field=f"{label}_id",
+                name=patches_dataset_name,
+                persistent=True,
+            )
+        if len(patches_dataset) == 0:
+            raise ValueError("no samples in the dataset")
+        return patches_dataset
 
     def _delete_field_if_exists(self, label_field: str):
         if not self.dataset:
