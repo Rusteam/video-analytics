@@ -12,7 +12,7 @@ multiple various tasks.
 - \[x\] Identify how many people entered and exited shop during the video
 - \[x\] Identify gender (male/female) and age (child/adult as classification) for each customer
 - \[ \] Identify number of unique customers that made a purchase
-- \[ \] Identify if cashier is right or left-handed
+- \[x\] Identify if cashier is right or left-handed
 
 ![example output](./example.gif)
 
@@ -175,6 +175,9 @@ It's also possible to review the clip predictions in the fiftyone app
 by opening the `<name>-patches` dataset. Filter customers by the `customer_id` field
 and review the label counts in the `clip` field.
 
+Example age and gender prediction for a single customer:
+![age and gender](./docs/images/customer_age_gender.png)
+
 **Possible improvements:**
 
 1. Select top-k patches per customer to optimize speed
@@ -197,7 +200,7 @@ on a patch-level for cashiers and compute a magnitude (i.e. xy-variance)
 of each hand movement across frames.
 
 ```
-❯ pymn FiftyoneDataset --name AIQ cashier_hand
+❯ python main.py FiftyoneDataset --name <name> cashier_hand
 
 Output:
 Cashier 'cashier-12' is 'right'-handed: left_var=0.07, right_var=0.12
@@ -208,6 +211,9 @@ Keypoint detection can be review in the fiftyone app as well.
 Filter on a specific cashier with the `cashier_id` field and
 then select wrist labels in the `keypoints` field. It might be
 useful to set a confidence threshold around 0.4-0.6.
+
+Example hand detection for a cashier:
+![keypoint detection result](./docs/images/cashier_hand_keypoints.png)
 
 **Possible improvements:**
 
