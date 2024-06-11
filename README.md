@@ -6,10 +6,11 @@ multiple various tasks.
 
 ## Features:
 
+- \[x\] Detect all people within a frame
 - \[x\] Identify number of unique customers in the shop
 - \[x\] Track each customer
 - \[x\] Identify how many people entered and exited shop during the video
-- \[ \] Identify gender (male/female) and age (child/adult as classification) for each customer
+- \[x\] Identify gender (male/female) and age (child/adult as classification) for each customer
 - \[ \] Identify number of unique customers that made a purchase
 - \[ \] Identify if cashier is right or left-handed
 
@@ -86,7 +87,8 @@ fiftyone app launch <name>
 python main.py FiftyoneDataset --name <name> track --model yolov8s --label-field yolov8s
 ```
 
-This command will create a label field "yolov8s" that will contain
+This command will download a respective yolov8 model to the current directory
+and create a label field "yolov8s" that will contain
 detections with COCO classes and track ids.
 
 - [Ultralytics yolov8](https://docs.ultralytics.com/tasks/detect/)
@@ -139,15 +141,45 @@ Output:
 An "exit" is defined as a last frame for each tracklet to
 intersect with the annotated "exit" zone.
 
-#### Age and Gender prediction (TODO)
+#### Age and Gender prediction
 
-To classify age and gender of each customer we need to do the following:
+Age and gender classification is handled by the `clip` model with 4 classes:
 
-1. Select top-k frames per track
-1. Run a deep learning model, options:
+- adult woman
+- adult man
+- girl
+- boy
 
-- [this huggingface model](https://huggingface.co/spaces/harshasurampudi/gender-and-age) with face detection and further classification
-- train a lightweight classification on the [adience dataset](https://paperswithcode.com/dataset/adience)
+The script below will create a new dataset with customer patches,
+download the `clip` model using `fiftyone zoo`
+and classify each patch into the defined categories. Then,
+the predictions will be grouped for each customer and simple voting
+will decides the final class probabilities.
+
+```
+❯ python main.py FiftyoneDataset --name <name> classify_customers --patch-field visitor_type --export-dir data/interim/patches
+
+Output:
+Customer 'customer-1' class probabilities: {'adult man': 0.64, 'boy': 0.18, 'adult w
+oman': 0.18}
+Customer 'customer-10' class probabilities: {'adult woman': 0.87, 'girl': 0.13}
+Customer 'customer-11' class probabilities: {'adult man': 0.62, 'adult woman': 0.38}
+Customer 'customer-14' class probabilities: {'adult man': 0.85, 'adult woman': 0.03,
+ 'boy': 0.13}
+Customer 'customer-15' class probabilities: {'adult man': 0.33, 'adult woman': 0.51,
+ 'girl': 0.16}
+Customer 'customer-17' class probabilities: {'adult man': 0.87, 'adult woman': 0.1,
+```
+
+It's also possible to review the clip predictions in the fiftyone app
+by opening the `<name>-patches` dataset. Filter customers by the `customer_id` field
+and review the label counts in the `clip` field.
+
+**Possible improvements:**
+
+1. Select top-k patches per customer to optimize speed
+1. Run a face detection algorithm and apply a model trained on
+   the [adience dataset](https://paperswithcode.com/dataset/adience)
 
 #### Customer purchase detection (TODO)
 

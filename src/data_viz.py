@@ -6,6 +6,7 @@ from pathlib import Path
 import fiftyone as fo
 import fiftyone.types as fot
 import fiftyone.utils.ultralytics as fouu
+import fiftyone.zoo as foz
 import pydantic
 import yaml
 from termcolor import cprint
@@ -254,10 +255,11 @@ class FiftyoneDataset(pydantic.BaseModel):
             customer_tracks = self._get_distinct_indices(
                 smp_view, tracking_field, "customer"
             )
+
+            # TODO add number of customers entering
             n_exit = 0
             cur_frame = smp.metadata["total_frame_count"]
             while len(customer_tracks) > 0 and cur_frame > 1:
-                # FIXME skip frames that do not contain labels
                 if not smp[cur_frame][tracking_field]:
                     cur_frame -= 1
                     continue
@@ -272,6 +274,61 @@ class FiftyoneDataset(pydantic.BaseModel):
                 cur_frame -= 1
 
             cprint(f"{smp.id}: Number of customers exiting is {n_exit}", "green")
+
+    def classify_customers(
+        self,
+        patch_field: str,
+        export_dir: str = "./data/export/patches",
+        overwrite: bool = False,
+    ):
+        patches_dataset_name = f"{self.name}-patches"
+        if fo.dataset_exists(patches_dataset_name) and overwrite:
+            fo.delete_dataset(patches_dataset_name, verbose=True)
+        elif fo.dataset_exists(patches_dataset_name):
+            patches_dataset = fo.load_dataset(patches_dataset_name)
+        else:
+            # # export patches
+            self._load_dataset()
+            customer_view = self._filter_labels(patch_field, label="customer")
+            patches = customer_view.to_frames(sample_frames=True).to_patches(
+                patch_field
+            )
+            for p in patches:
+                p[
+                    patch_field
+                ].label = f"{ p[patch_field].label }-{p[patch_field].index}"
+                p.save()
+            patches.export(
+                export_dir=export_dir,
+                dataset_type=fot.ImageClassificationDirectoryTree,
+                label_field=patch_field,
+            )
+            patches_dataset = fo.Dataset.from_dir(
+                export_dir,
+                dataset_type=fot.ImageClassificationDirectoryTree,
+                label_field="customer_id",
+                name=f"{self.name}-patches",
+                persistent=True,
+            )
+
+        # classify patches
+        clip = foz.load_zoo_model(
+            "clip-vit-base32-torch", classes=["adult man", "adult woman", "girl", "boy"]
+        )
+        patches_dataset.apply_model(clip, label_field="clip", batch_size=4)
+        cprint(f"Finished predicting on {len(patches_dataset)} samples", "yellow")
+
+        # print top value for each customer
+        customer_ids = patches_dataset.distinct("customer_id.label")
+        for idx in customer_ids:
+            label_counts = patches_dataset.match(
+                fo.ViewField("customer_id.label") == idx
+            ).count_values("clip.label")
+            num_predictions = sum(label_counts.values())
+            class_probs = {
+                k: round(v / num_predictions, 2) for k, v in label_counts.items()
+            }
+            cprint(f"Customer {idx!r} class probabilities: {class_probs}", "green")
 
     def _delete_field_if_exists(self, label_field: str):
         if not self.dataset:
