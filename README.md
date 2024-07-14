@@ -6,7 +6,8 @@ multiple various tasks.
 
 ## Features:
 
-- \[x\] Detect all people within a frame
+- \[x\] Detect and count all people within a frame
+- \[x\] Count unique people using tracking+reid
 - \[x\] Identify number of unique customers in the shop
 - \[x\] Track each customer
 - \[x\] Identify how many people entered and exited shop during the video
@@ -95,6 +96,28 @@ detections with COCO classes and track ids.
   family of models is used for object detection.
 - [BoxSort](https://github.com/NirAharon/BoT-SORT) is used to
   connect frame-level detections into tracklets.
+
+### Count unique people with reid
+
+In order to tracking algorithms with a reid model,
+install `boxmot` and run it on top of existing detections.
+
+```
+pip install boxmot
+
+python main.py FiftyoneDataset --name <name>
+    track_reid
+    --label-field yolob8s
+    --tracking_method deepocsort
+    --reid-model osnet_x0_25_market1501.pt
+    --new_field deepocsort_market
+```
+
+A new label field will be created, it will contain an index
+parameter and will be available in the fiftyone app for inspection.
+
+Other reid models and tracking methods are also available:
+check (the source repo)\[https://github.com/mikel-brostrom/boxmot?tab=readme-ov-file\] for more details.
 
 #### Count customers
 

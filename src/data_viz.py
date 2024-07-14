@@ -2,7 +2,9 @@
 
 from collections import defaultdict
 from pathlib import Path
+from typing import Optional
 
+import cv2
 import fiftyone as fo
 import fiftyone.types as fot
 import fiftyone.utils.ultralytics as fouu
@@ -11,6 +13,7 @@ import numpy as np
 import pydantic
 import yaml
 from termcolor import cprint
+from tqdm import tqdm
 from ultralytics import YOLO
 
 
@@ -31,6 +34,47 @@ def _boxes_match(src_detection: list[float], target_detection: list[float]):
     within_x = zone_x < bbox_center[0] < zone_x + zone_w
     within_y = zone_y < bbox_center[1] < zone_y + zone_h
     return int(within_x and within_y)
+
+
+def _to_boxmot_detection(
+    detection: fo.Detection, width: int, height: int, class_labels: list[str]
+) -> list[float]:
+    """Convert fiftyone detection to boxmot format.
+
+    Expected format: (x, y, x, y, conf, cls)
+    """
+    x0, y0, w, h = detection.bounding_box
+    x_min, y_min = x0 * width, y0 * height
+    x_max, y_max = (x0 + w) * width, (y0 + h) * height
+
+    return [
+        x_min,
+        y_min,
+        x_max,
+        y_max,
+        detection.confidence,
+        class_labels.index(detection.label),
+    ]
+
+
+def _from_boxmot_tracklet(
+    tracklet: np.ndarray, width: int, height: int, class_labels: list[str]
+) -> fo.Detection:
+    """Convert boxmot tracklet to fiftone detection format.
+
+    Input format: (x, y, x, y, id, conf, cls, index)
+    """
+    x_min, y_min, x_max, y_max, idx, conf, class_id, track_id = tracklet
+
+    x0, y0 = x_min / width, y_min / height
+    w, h = (x_max - x_min) / width, (y_max - y_min) / height
+
+    return fo.Detection(
+        bounding_box=[x0, y0, w, h],
+        confidence=conf,
+        label=class_labels[int(class_id)],
+        index=int(idx),
+    )
 
 
 class UltralyticsModel(pydantic.BaseModel):
@@ -93,6 +137,45 @@ class UltralyticsModel(pydantic.BaseModel):
         return self.pose_estimator(path, stream=True, show=False)
 
 
+class BoxmotTracker(pydantic.BaseModel):
+    """Boxmot tracking and reid configuration.
+
+    More details @ https://github.com/mikel-brostrom/boxmot
+    """
+
+    tracking_method: str = "botsort"
+    reid_model: str = "osnet_x0_25_market1501.pt"
+    fp16: bool = False
+    max_age: int = 300
+
+    @property
+    def device(self):
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda:0"
+        elif torch.backends.mps.is_available():
+            return "mps"
+        else:
+            return "cpu"
+
+    @property
+    def tracker(self):
+        from boxmot import BoTSORT, DeepOCSORT, StrongSORT
+
+        trackers = dict(botsort=BoTSORT, deepocsort=DeepOCSORT, strongsort=StrongSORT)
+        if self.tracking_method not in trackers:
+            raise ValueError(
+                f"Wrong tracking method passed, available {trackers.keys()}"
+            )
+        return trackers[self.tracking_method](
+            model_weights=Path(self.reid_model),
+            device=self.device,
+            fp16=self.fp16,
+            max_age=self.max_age,
+        )
+
+
 class AnnotatedZone(pydantic.BaseModel):
     smp_id: str
     cashier: list[float]
@@ -123,7 +206,10 @@ class FiftyoneDataset(pydantic.BaseModel):
         False, description="whether to overwrite the dataset if already exists"
     )
     # created in the code
-    dataset: None = None
+    dataset: Optional[fo.Dataset] = None
+
+    class Config:
+        arbitrary_types_allowed = True
 
     def create(self, path: str):
         """Create a fiftyone dataset from a folder of video files"""
@@ -142,13 +228,7 @@ class FiftyoneDataset(pydantic.BaseModel):
         )
         cprint(f"Successfully created a dataset with {len(self.dataset)}")
 
-    def _load_dataset(self):
-        if self.name in fo.list_datasets():
-            self.dataset = fo.load_dataset(self.name)
-        else:
-            raise KeyError("Dataset {self.name=!r} does not exist")
-
-    def track(self, label_field: str = "detections", **kwargs):
+    def track(self, label_field: str = "detections", debug: bool = False, **kwargs):
         """Apply yolov8 detector and tracker"""
         model = UltralyticsModel(**kwargs)
         self._load_dataset()
@@ -157,11 +237,34 @@ class FiftyoneDataset(pydantic.BaseModel):
             frame_no = 1
             for res in results:
                 detections = fouu.to_detections(res)
-                for det, idx in zip(detections.detections, res.boxes.id):
-                    det.index = idx
                 smp.frames[frame_no][label_field] = detections
                 frame_no += 1
-                if frame_no > 20:
+                if debug and frame_no > 20:
+                    break
+            smp.save()
+        cprint(f"Finished tracking for {len(self.dataset)} samples", "green")
+
+    def track_reid(
+        self, label_field: str, new_field: str, debug: bool = False, **kwargs
+    ):
+        """Apply boxmot tracker with a reid model on top of existing detections."""
+        tracker = BoxmotTracker(**kwargs).tracker
+        self._load_dataset()
+        self.dataset.compute_metadata()
+        for smp in self.dataset.select_fields(f"frames.{ label_field }"):
+            vidoe_capture = self._get_video_capture(smp)
+            frame_no = 1
+            for frame_id in tqdm(smp.frames, desc="Iterating frames"):
+                detections = self._as_boxmot_detections(smp, frame_id, label_field)
+                img = self._read_video_frame(vidoe_capture, frame_id - 1)
+                tracks = tracker.update(np.array(detections), img)
+                smp.frames[frame_id][new_field] = self._from_boxmot_tracklets(
+                    tracks, smp, label_field
+                )
+
+                # debug
+                frame_no += 1
+                if debug and frame_no > 100:
                     break
             smp.save()
         cprint(f"Finished tracking for {len(self.dataset)} samples", "green")
@@ -359,6 +462,12 @@ class FiftyoneDataset(pydantic.BaseModel):
                 "green",
             )
 
+    def _load_dataset(self):
+        if self.name in fo.list_datasets():
+            self.dataset = fo.load_dataset(self.name)
+        else:
+            raise KeyError("Dataset {self.name=!r} does not exist")
+
     def _create_patches(
         self, patch_field: str, label: str, export_dir: str, overwrite: bool
     ):
@@ -436,3 +545,54 @@ class FiftyoneDataset(pydantic.BaseModel):
         return view.filter_labels(
             f"frames.{label_field}", fo.ViewField("label") == label
         ).distinct(f"frames.{label_field}.detections.index")
+
+    @staticmethod
+    def _get_video_capture(smp: fo.Sample):
+        cap = cv2.VideoCapture(smp.filepath)
+        if not cap.isOpened():
+            raise ValueError(f"Unable to read a video file at {smp.filepath!r}")
+        else:
+            return cap
+
+    @staticmethod
+    def _read_video_frame(
+        cap: cv2.VideoCapture, frame_number: int
+    ) -> np.ndarray | None:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+        ret, img = cap.read()
+        if ret:
+            return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        else:
+            print(f"Could not read frame {frame_number}")
+
+    def _as_boxmot_detections(
+        self, smp: fo.Sample, frame_id: int, label_field: str
+    ) -> list[list[float]]:
+        detections = smp[frame_id][label_field].detections
+        return [
+            _to_boxmot_detection(
+                det,
+                width=smp.metadata["frame_width"],
+                height=smp.metadata["frame_height"],
+                class_labels=self._get_class_labels(f"frames.{ label_field }"),
+            )
+            for det in detections
+        ]
+
+    def _from_boxmot_tracklets(
+        self, tracks: np.ndarray, smp: fo.Sample, label_field: str
+    ) -> fo.Detections:
+        return fo.Detections(
+            detections=[
+                _from_boxmot_tracklet(
+                    tracklet,
+                    width=smp.metadata["frame_width"],
+                    height=smp.metadata["frame_height"],
+                    class_labels=self._get_class_labels(f"frames.{ label_field }"),
+                )
+                for tracklet in tracks
+            ]
+        )
+
+    def _get_class_labels(self, label_field: str) -> list[str]:
+        return self.dataset.distinct(f"{label_field}.detections.label")
